@@ -49,6 +49,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <assert.h>
 
 cvar_t *cvar_profiler = NULL;
@@ -1261,6 +1262,60 @@ init_vulkan(void)
 	if (picked_device < 0)
 	{
 		Com_Error(ERR_FATAL, "No ray tracing capable GPU found.");
+	}
+
+	// Optional explicit pin: when Q2RTX_TARGET_UUID is set, use the enumerated
+	// device whose Vulkan UUID matches it. In headless multi-GPU environments the
+	// enumeration order does not follow PCI/nvidia-smi indexing, so without this
+	// the render lands on an arbitrary card. Unset => legacy "first capable" pick.
+	{
+		const char* target_uuid = getenv("Q2RTX_TARGET_UUID");
+		if (target_uuid && *target_uuid)
+		{
+			char want[64] = {0};
+			for (const char* p = target_uuid; *p && (int)(p - target_uuid) < 60; p++)
+			{
+				if ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F'))
+					want[(int)(p - target_uuid)] = (char)tolower(*p);
+			}
+			if (strlen(want) == 32)
+			{
+				int pinned = -1;
+				for (int i = 0; i < (int)num_devices; i++)
+				{
+					VkPhysicalDeviceIDProperties idp = {
+						.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+						.pNext = NULL
+					};
+					VkPhysicalDeviceProperties2 p2 = {
+						.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+						.pNext = &idp
+					};
+					vkGetPhysicalDeviceProperties2(devices[i], &p2);
+					char have[40];
+					for (int b = 0; b < VK_UUID_SIZE; b++)
+						snprintf(have + 2 * b, 3, "%02x", idp.deviceUUID[b]);
+					if (strcmp(have, want) == 0)
+					{
+						pinned = i;
+						break;
+					}
+				}
+				if (pinned >= 0)
+				{
+					Com_Printf("Q2RTX_TARGET_UUID pinned physical device %d\n", pinned);
+					picked_device = pinned;
+				}
+				else
+				{
+					Com_Printf("Q2RTX_TARGET_UUID %s matched no enumerated device; keeping pick %d\n", target_uuid, picked_device);
+				}
+			}
+			else
+			{
+				Com_Printf("Q2RTX_TARGET_UUID %s is not a 32-hex-char UUID; ignoring\n", target_uuid);
+			}
+		}
 	}
 
 	qvk.physical_device = devices[picked_device];
